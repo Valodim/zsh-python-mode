@@ -61,6 +61,11 @@ zsh special variables.
 ## Hints and caveats
 
 * the python session is bound to the zsh process. To reset it, run `exec zsh`
+
+* variable interpolation also replaces $word inside strings, leading to a
+  to a parse error or even undefined behavior. I plan to fix this and have
+  a couple of ways to go about it in mind but none yet that really feels
+  right. leaving this as a todo for now.
 * getting ^C, ^D, and ^M to behave involved a number of rather ugly hacks. I'm
   happy with the resulting behavior, but there might be corner cases I didn't
   take into consideration.
