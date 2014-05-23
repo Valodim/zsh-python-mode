@@ -1,5 +1,8 @@
 # zsh-python-mode
 
+Disclaimer: This entire thing is a heap of half-baked, unfinished, not well
+documented code.  Don't judge me bro.
+
 This bit of zsh configuration aims to provide a ui frontend for seamless use of
 python in an interactive zsh session, making use of zyx's excellent
 [zsh/zpython] module. That module is (at the time of this writing) not part of
