@@ -1,0 +1,433 @@
+emulate -L zsh
+
+zpy_init () {
+    # already loaded? great.
+    [[ -n $modules[zsh/zpython] ]] && return 0
+
+    # set _ZPY_ON as global but hidden variable
+    typeset -H -i _ZPY_ON
+
+    # load zpython
+    zmodload zsh/zpython || return 1
+
+    local -i has_complete=0 has_highlight=0
+
+    # import zsh features to python environment
+    zpython '
+import zsh
+import os
+import sys
+import re
+
+# more like "namespace" :)
+sandbox = globals()
+
+import __main__
+
+# private imports
+import codeop
+import pprint
+import traceback
+
+# uncomment to set up a convenient dict for communication
+# zsh.py = {}
+# I edited zsh/zpython to change the check for "zpython" prefix to just "py"
+# zsh.set_special_hash("py", zsh.py)
+
+def zeval_prepare(src):
+    zsh.prepared_assign = None
+    # special syntax: if the entire statement starts with an assignment of a $
+    # variable, remember that name for later
+    match = re.search(r"^\$(\w+)\s+=\s+", src)
+    if match:
+        zsh.prepared_assign = match.group(1)
+        # remove the match from source
+        src = re.sub(r"^\$(\w+)\s+=\s+", "", src)
+    # special syntax: replace $var with zsh.getvalue
+    src = re.sub(r"\$(\w+)", "zsh.getvalue(\"\\1\")", src)
+    try:
+        zsh.prepared_type = 0
+        try:
+            # try to compile as expression
+            c = codeop.compile_command(src, symbol="eval")
+            if c is None:
+                return 3
+            zsh.prepared_type = 1
+        except SyntaxError:
+            # if this is supposed to be an assignment, it must be an eval!
+            if zsh.prepared_assign is not None:
+                raise SyntaxError("cannot assign a statement!")
+            # if that didnt work out, try as statement
+            c = codeop.compile_command(src, symbol="single")
+            if c is None:
+                return 3
+            zsh.prepared_type = 2
+        zsh.prepared_code = c
+        return zsh.prepared_type
+    except Exception as e:
+        sys.stderr.write("\n")
+        traceback.print_exc()
+        return 0
+
+# define function for evaluation
+def zeval_run():
+    try:
+        if zsh.prepared_type == 1:
+            result = eval(zsh.prepared_code, sandbox)
+            if zsh.prepared_assign is not None:
+                zsh.setvalue(zsh.prepared_assign, result)
+            elif result is not None:
+                pprint.pprint(result)
+        elif zsh.prepared_type == 2:
+            exec(zsh.prepared_code, sandbox)
+        else:
+            sys.stderr.write("zpy internal error")
+            return False
+        return True
+    except Exception as e:
+        traceback.print_exc()
+        return False
+    finally:
+        # only ever try this once!
+        zsh.prepared_assign = None
+        zsh.prepared_code = None
+# keep our namespace clean!
+zsh.zeval_prepare = zeval_prepare
+zsh.zeval_run = zeval_run
+del zeval_prepare, zeval_run
+
+try:
+    # anonymous scope
+    def setup():
+        import pygments
+        import pygments.formatter
+        import pygments.lexers
+        from pygments.util import get_choice_opt
+        from pygments.token import Keyword, Name, Comment, String, Error, \
+             Number, Operator, Generic, Token, Whitespace
+
+        class ZshFormatter(pygments.formatter.Formatter):
+            def __init__(self, **kwargs):
+                super(ZshFormatter, self).__init__(**kwargs)
+                self.darkbg = get_choice_opt(kwargs, "bg", ["light", "dark"], "light") == "dark"
+                self.colorscheme = kwargs.get("colorscheme", None) or {
+                    Token:              ("",            ""),
+
+                    Whitespace:         ("lightgray",   "darkgray"),
+                    Comment:            ("lightgray",   "darkgray"),
+                    Comment.Preproc:    ("teal",        "turquoise"),
+                    Keyword:            ("darkblue",    "blue"),
+                    Keyword.Type:       ("teal",        "turquoise"),
+                    Operator.Word:      ("purple",      "fuchsia"),
+                    Name.Builtin:       ("teal",        "turquoise"),
+                    Name.Function:      ("darkgreen",   "green"),
+                    Name.Namespace:     ("_teal_",      "_turquoise_"),
+                    Name.Class:         ("_darkgreen_", "_green_"),
+                    Name.Exception:     ("teal",        "turquoise"),
+                    Name.Decorator:     ("darkgray",    "lightgray"),
+                    Name.Variable:      ("darkred",     "red"),
+                    Name.Constant:      ("darkred",     "red"),
+                    Name.Attribute:     ("teal",        "turquoise"),
+                    Name.Tag:           ("blue",        "blue"),
+                    String:             ("brown",       "brown"),
+                    Number:             ("darkblue",    "blue"),
+
+                    Generic.Deleted:    ("red",        "red"),
+                    Generic.Inserted:   ("darkgreen",  "green"),
+                    Generic.Heading:    ("**",         "**"),
+                    Generic.Subheading: ("*purple*",   "*fuchsia*"),
+                    Generic.Error:      ("red",        "red"),
+
+                    Error:              ("_red_",      "_red_"),
+                }
+
+                self.codes = {}
+                self.codes[""]          = None
+                self.codes["reset"]     = None
+
+                dark_colors  = ["black", "darkred", "darkgreen", "brown", "darkblue",
+                                "purple", "teal", "lightgray"]
+                light_colors = ["darkgray", "red", "green", "yellow", "blue",
+                                "fuchsia", "turquoise", "white"]
+
+                zsh_colors = ["black", "red", "green", "yellow", "blue", "magenta", "cyan", "white"]
+
+                x = 0
+                for d, l in zip(dark_colors, light_colors):
+                    self.codes[d] = ["fg="+zsh_colors[x]]
+                    self.codes[l] = ["bold"]+self.codes[d]
+                    x += 1
+
+                self.codes["darkteal"]   = self.codes["turquoise"]
+                self.codes["darkyellow"] = self.codes["brown"]
+                self.codes["fuscia"]     = self.codes["fuchsia"]
+                self.codes["white"]      = ["bold"]
+
+            def format_unencoded(self, tokensource, outfile):
+                offset = 0
+                for ttype, value in tokensource:
+                    color = self.colorscheme.get(ttype)
+                    while color is None:
+                        ttype = ttype[:-1]
+                        color = self.colorscheme.get(ttype)
+                    if color:
+                        color = color[self.darkbg]
+                    if not isinstance(value, unicode):
+                        vlen = len(unicode(value, "utf-8"))
+                    else:
+                        vlen = len(value)
+                    zfmt = self.zshformat(color)
+                    if zfmt:
+                        outfile.write(str(offset)+" "+str(offset+vlen)+" "+
+                                    (",".join(zfmt))+"\n")
+                    offset += vlen
+
+            def zshformat(self, attr):
+                result = []
+                if attr[:1] == attr[-1:] == "+":
+                    # Good, blinking is not supported
+                    attr = attr[1:-1]
+                if attr[:1] == attr[-1:] == "*":
+                    result.append("bold")
+                    attr = attr[1:-1]
+                if attr[:1] == attr[-1:] == "_":
+                    result.append("underline")
+                    attr = attr[1:-1]
+                if self.codes[attr]:
+                    result.extend(self.codes[attr])
+                return result
+
+        class ZPyLexer(pygments.lexers.PythonLexer):
+            pass
+        ZPyLexer.tokens["root"].append((r"\$\w+", Name.Variable.Global))
+
+        lexer = ZPyLexer()
+        formatter = ZshFormatter()
+        def highlight():
+            if zsh.getvalue("PENDING"):
+                return
+            BUFFER = zsh.getvalue("BUFFER")
+            tokens = pygments.lex(BUFFER, lexer)
+            fmt = pygments.format(tokens, formatter)
+            zsh.setvalue("result", fmt.split("\n"))
+        zsh.highlight = highlight
+    setup()
+    del setup
+
+    zsh.setvalue("has_highlight", 1)
+
+except Exception as e:
+    # no highlighting :(
+    print e
+
+try:
+    from jedi import Interpreter
+    from jedi.api.helpers import completion_parts
+    from jedi.parser.user_context import UserContext
+
+    def complete(text):
+        sys.path.insert(0, os.getcwd())
+        # Calling python doesn''t have a path, so add to sys.path.
+        try:
+            interpreter = Interpreter(text, [sandbox])
+
+            path = UserContext(text, (1, len(text))).get_path_until_cursor()
+            path, dot, like = completion_parts(path)
+            # before = text[:len(text) - len(like)]
+            completions = interpreter.completions()
+        finally:
+            sys.path.pop(0)
+
+        return [path + dot + c.name_with_symbols for c in completions]
+    zsh.complete = complete
+    del complete
+    zsh.setvalue("has_complete", 1)
+except:
+    # no completion :(
+    pass
+'
+
+    if (( has_highlight )); then
+        _zsh_highlight_zpy_highlighter () {
+            local result
+            zpython 'zsh.highlight()'
+            region_highlight=($result)
+        }
+
+        _zsh_highlight_zpy_highlighter_predicate () {
+            _zsh_highlight_buffer_modified
+        }
+    fi
+
+    if (( has_complete )); then
+        _zpy_complete () {
+            if [[ ${${words[CURRENT]}[1]} == '$' ]]; then
+                _parameters && return 0
+            fi
+            local expl result
+            zpython 'zsh.setvalue("result", zsh.complete(zsh.getvalue("BUFFER")))'
+            _wanted py expl 'Python Completions' compadd -a result
+        }
+    else
+        _zpy_complete () {
+            _message 'no python completion available (no jedi installed?)'
+        }
+    fi
+
+    # # prompt precmd hook
+    # +prompt-zpy () {
+    #     # drop it if we aren't in zpy, but don't interfere with other hooks
+    #     (( _ZPY_ON )) || return 0
+
+    #     # display it according to the prompt theme's styles - if they exist
+    #     local tmp
+    #     zstyle -s ":prompt:${prompt_theme[1]}:ps1:zpy:" bitformat tmp || tmp="py"
+    #     # any kind of parameters from python we can use here? guess not, for now...
+    #     zformat -f REPLY $tmp p:pyton
+    #     # add our bit to the array
+    #     prompt_bits+=( $REPLY )
+
+    #     return 0
+    # }
+
+    # hack: make sure the line is not entirely empty, so we can distinguish an
+    # empty line accept from an empty line ^D
+    zpy-accept-line () {
+        (( _ZPY_ON )) || return
+        [[ -z $BUFFER ]] && BUFFER=" "
+        zle .accept-line
+    }
+    zle -N zpy-accept-line
+
+    bindkey -N zpython main
+    # make sure this is the default accept-line widget
+    bindkey -M zpython '^M' zpy-accept-line
+    zle -C zpy-complete complete-word _generic
+    zstyle ':completion:zpy-complete:*' completer _zpy_complete
+    bindkey -M zpython '^I' zpy-complete
+
+}
+
+# ---------- where the actual zpy-enable starts --------------------
+
+# if this is called inside zpy, disable zpy and accept the line
+if (( _ZPY_ON )); then
+    _ZPY_ON=0
+    zle .accept-line
+    return
+fi
+
+setopt localoptions extendedglob
+
+# initialize on first run
+zpy_init || return 1
+
+zpy-call-hooks () {
+    local hooks hook
+    if zstyle -a ":zpy:hooks:$1" hooks hooks; then
+        for hook in $hooks; do
+            +zpy-$hook || break
+        done
+    fi
+    if [[ $1 == (enter|leave) ]]; then
+        # on enter and leave, also redraw the prompt
+        _ZSH_HIGHLIGHT_PRIOR_BUFFER=uncached
+        (( $+functions[_zsh_highlight] )) && _zsh_highlight
+        zle .reset-prompt
+    fi
+}
+
+_ZPY_ON=1
+
+local -a old_highlighters
+old_highlighters=( "${(@)ZSH_HIGHLIGHT_HIGHLIGHTERS}" )
+ZSH_HIGHLIGHT_HIGHLIGHTERS=( )
+(( $+functions[_zsh_highlight_zpy_highlighter] )) && ZSH_HIGHLIGHT_HIGHLIGHTERS+=( zpy )
+
+# replace common completer, for stuff like ^D and such
+local -a oldcomp
+zstyle -a ':completion:*' completer oldcomp
+zstyle ':completion:*' completer _zpy_complete
+
+fc -p -a $ZSH/.zsh_py_history
+{
+    zpy-call-hooks enter
+    # at this point, we stay in a loop of recursive-edit, simulating new
+    # prompts by emitting newlines and redrawing the prompt at the right
+    # places. this works fine MOSTLY, except for the significant case of
+    # multiline input, where the output is obscured by the redrawn prompt.
+    #
+    # TODO maybe switch to a mode where we actually accept the line, deal
+    # with it in some way and then re-enter zpy mode in line init? this is
+    # difficult because there is no proper way to intercept accepted
+    # lines…
+    while true; do
+        # spawn recursive line editor
+        if ! zle recursive-edit -K zpython; then
+            zle send-break
+            return
+        fi
+        # clean break on empty buffer (happens with ^D)
+        [[ -z $BUFFER ]] && break
+        # clean break if _ZPY_ON is no longer valid (happens with zpy-end)
+        (( _ZPY_ON )) || break
+        # disregard command if it's just a space (happens on empty accept-line)
+        if [[ $BUFFER != " " ]]; then
+            local -i result=0
+            # prepare statement
+            zpython 'zsh.setvalue("result", zsh.zeval_prepare(zsh.getvalue("BUFFER")))'
+            case $result in
+                0) ;; # error - nothing to do here I guess?
+                3)
+                    # last line entirely empty?
+                    # if [[ ${${(f)BUFFER}[-1]} != [[:space:]]# ]]; then
+                        # poor man's continuation prompt
+                        BUFFER+=$'\n  '
+                        # set up display for next 
+                        CURSOR=$#BUFFER
+                        zle redisplay
+                        continue
+                    # fi
+                    # BUFFER="${BUFFER%% #}"$'\n'
+                    # close buffered thing
+                    # zpython 'zsh.setvalue("result", zsh.zeval_prepare(zsh.getvalue("BUFFER")))'
+                    # if [[ $result != (1|2) ]]; then
+                        # continue
+                    # fi
+                    # continue to next
+                    ;&
+                1|2)
+                    # print as many newlines as appear in buffer string, to
+                    # reposition the prompt appropriately
+                    echo ${BUFFER//[^$'\n']/}
+                    # echo
+                    zpython 'zsh.setvalue("result", zsh.zeval_run())'
+                    # write it to history
+                    print -sr -- ${BUFFER} # we are NOT doing the %$'\n' thing!
+                    # update history pointer
+                    HISTNO=$HISTCMD
+                    ;;
+            esac
+        else
+            # move to next line, emulating what the normal line editor does
+            echo
+        fi
+        BUFFER=
+        zle reset-prompt
+    done
+    # clean reset: restore all old values, exit python mode, but leave buffer intact
+    _ZPY_ON=0
+    ZSH_HIGHLIGHT_HIGHLIGHTERS=( "${(@)old_highlighters}" )
+    zstyle ':completion:*' completer $oldcomp
+    zpy-call-hooks leave
+} always {
+    # if we got out of the loop by any means other than a clean break, make
+    # sure stuff is reset for the next zle line
+    if (( _ZPY_ON )); then
+        # restore all old values
+        _ZPY_ON=0
+        ZSH_HIGHLIGHT_HIGHLIGHTERS=( "${(@)old_highlighters}" )
+        zstyle ':completion:*' completer $oldcomp
+    fi
+}
+
