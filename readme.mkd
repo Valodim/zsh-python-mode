@@ -1,0 +1,72 @@
+# zsh-python-mode
+
+This bit of zsh configuration aims to provide a ui frontend for seamless use of
+python in an interactive zsh session, making use of zyx's excellent
+[zsh/zpython] module. That module is (at the time of this writing) not part of
+the regular zsh distribution, so you will likely have to compile it yourself.
+It should work with the unmodified source from zyx's [repository].
+
+This was kind of a weekend project for me when I needed a break from other
+stuff. I'm not sure if this feature ever finds its way into my workflow, it
+might just as well turn out to be fruitless endeavour.
+
+Anyways I still find the idea rather interesting, so I decided to take a couple
+screenshots and upload it. If you have some ideas on what could be done
+differently or nicer (especially with the variable integration parts), hit me
+up in #zsh on freenode :)
+
+
+## The gist of it
+
+The entire thing is pretty much just one widget, `zpy-enable`. Installation
+boils down to copying the zpy-enable file into your fpath (or adding the
+repository dir to $fpath), then autoloading and binding the widget. See
+`example.config.zsh` for more on this.
+
+Calling this widget will enter a mode that interprets commands as python rather
+than zsh.  It moves a few things around, but will generally try to change as
+little in actual editing behavior as possible. The mode will stay enabled until
+^D is pressed on an empty line, the zpy-enable widget is called again, or the
+line is aborted (^C).
+
+Syntax highlighting requires the zsh-syntax-highlighting loaded and [pygments]
+installed to work. To get completion support, [jedi] needs to be installed.
+
+![completion screenshot](screenshots/zpy_completion.png)
+
+
+## Variable interpolation
+
+There are two syntax extensions added to interactively executed python code,
+for a more seamless integration. Firstly, expressions of the form `$var`
+anywhere in the code are replaced by `zsh.getvalue("var")`. While this is a
+fairly hackish way to go about it, this results in fairly natural variable
+interpolation, allowing well-typed use in more complex expressions with proper
+scoping.
+
+![interpolation screenshot](screenshots/zpy_interpolation.png)
+
+Secondly, the same type of expression at the beginning of a line followed by an
+assignment operator as in `$var = expr` will be replaced by
+`zsh.setvariable("word", expr)`. This is even more hackish, doesn't work
+anywhere in expressions or anything, but provides a convenient way to assign
+zsh variables. For a more robust method, zpython can bind python variables to
+zsh special variables.
+
+![assignandspecial screenshot](screenshots/zpy_assignandspecial.png)
+
+## Hints and caveats
+
+* the python session is bound to the zsh process. To reset it, run `exec zsh`
+* getting ^C, ^D, and ^M to behave involved a number of rather ugly hacks. I'm
+  happy with the resulting behavior, but there might be corner cases I didn't
+  take into consideration.
+* multiline commands work weirdly and output will often be obscured by the
+  prompt. this is a consequence of the zle recursive-edit technique used,
+  unfortunately I couldn't get this to behave properly. :(
+
+
+[zsh/zpython]:  http://www.zsh.org/mla/workers/2013/msg00055.html
+[repository]: https://bitbucket.org/ZyX_I/zsh/src
+[pygments]: http://pygments.org/
+[jedi]: http://jedi.jedidjah.ch/en/latest/
